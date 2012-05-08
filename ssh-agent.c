@@ -128,6 +128,8 @@ u_int parent_alive_interval = 0;
 char socket_name[MAXPATHLEN];
 char socket_dir[MAXPATHLEN];
 
+char notification[MAXPATHLEN];
+
 /* locking */
 int locked = 0;
 char *lock_passwd = NULL;
@@ -136,6 +138,27 @@ extern char *__progname;
 
 /* Default lifetime (0 == forever) */
 static int lifetime = 0;
+
+static void
+notify_user(Identity *id)
+{
+	char *p;
+	char *cmd;
+
+	if (notification == NULL) {
+		debug("no notification program set");
+		return;
+	}
+
+	p = key_fingerprint(id->key, SSH_FP_MD5, SSH_FP_HEX);
+	debug("notifying key challenge signed for fingerprint %s path %s", p, id->comment);
+	cmd = xmalloc(sizeof notification+sizeof p+sizeof id->comment+8);
+	sprintf(cmd, "%s -m %s -t %s", notification, id->comment, p);
+	debug(cmd);
+	system(cmd);
+	xfree(cmd);
+	xfree(p);
+}
 
 static void
 close_socket(SocketEntry *e)
@@ -294,6 +317,9 @@ process_authentication_challenge1(SocketEntry *e)
 		buffer_put_char(&msg, SSH_AGENT_RSA_RESPONSE);
 		for (i = 0; i < 16; i++)
 			buffer_put_char(&msg, mdbuf[i]);
+
+		notify_user(id);
+
 		goto send;
 	}
 
@@ -317,6 +343,7 @@ process_sign_request2(SocketEntry *e)
 	extern int datafellows;
 	int odatafellows;
 	int ok = -1, flags;
+	Identity *id;
 	Buffer msg;
 	Key *key;
 
@@ -332,7 +359,7 @@ process_sign_request2(SocketEntry *e)
 
 	key = key_from_blob(blob, blen);
 	if (key != NULL) {
-		Identity *id = lookup_identity(key, 2);
+		id = lookup_identity(key, 2);
 		if (id != NULL && (!id->confirm || confirm_key(id) == 0))
 			ok = key_sign(id->key, &signature, &slen, data, dlen);
 		key_free(key);
@@ -341,6 +368,8 @@ process_sign_request2(SocketEntry *e)
 	if (ok == 0) {
 		buffer_put_char(&msg, SSH2_AGENT_SIGN_RESPONSE);
 		buffer_put_string(&msg, signature, slen);
+		if (id)
+			notify_user(id);
 	} else {
 		buffer_put_char(&msg, SSH_AGENT_FAILURE);
 	}
@@ -1057,6 +1086,7 @@ usage(void)
 	fprintf(stderr, "  -d          Debug mode.\n");
 	fprintf(stderr, "  -a socket   Bind agent socket to given name.\n");
 	fprintf(stderr, "  -t life     Default identity lifetime (seconds).\n");
+	fprintf(stderr, "  -n path     Path to the notification program.\n");
 	exit(1);
 }
 
@@ -1066,7 +1096,7 @@ main(int ac, char **av)
 	int c_flag = 0, d_flag = 0, k_flag = 0, s_flag = 0;
 	int sock, fd, ch, result, saved_errno;
 	u_int nalloc;
-	char *shell, *format, *pidstr, *agentsocket = NULL;
+	char *shell, *format, *pidstr, *agentsocket = NULL, *notification_prog = NULL;
 	fd_set *readsetp = NULL, *writesetp = NULL;
 	struct sockaddr_un sunaddr;
 #ifdef HAVE_SETRLIMIT
@@ -1098,7 +1128,7 @@ main(int ac, char **av)
 	init_rng();
 	seed_rng();
 
-	while ((ch = getopt(ac, av, "cdksa:t:")) != -1) {
+	while ((ch = getopt(ac, av, "cdksan:t:")) != -1) {
 		switch (ch) {
 		case 'c':
 			if (s_flag)
@@ -1126,6 +1156,10 @@ main(int ac, char **av)
 				fprintf(stderr, "Invalid lifetime\n");
 				usage();
 			}
+			break;
+		case 'n':
+			notification_prog = optarg;
+			snprintf(notification, sizeof notification, "%s", notification_prog);
 			break;
 		default:
 			usage();
